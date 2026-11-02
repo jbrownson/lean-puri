@@ -6,8 +6,12 @@
 // per event, and Lean decodes them (Platform.lean), so policy stays in Lean.
 
 #include <lean/lean.h>
+#define SDL_MAIN_HANDLED
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 #include <thorvg_capi.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {

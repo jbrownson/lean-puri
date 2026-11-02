@@ -29,5 +29,5 @@ cmake --install "$src/SDL/build"
 
 meson setup "$src/thorvg/build" "$src/thorvg" --reconfigure --buildtype=release \
   --prefix="$out" --libdir=lib -Ddefault_library=shared \
-  -Dengines=sw -Dloaders=svg,ttf -Dbindings=capi -Dtools= -Dexamples=false -Dtests=false
+  -Dengines=cpu -Dloaders=svg,ttf -Dbindings=capi -Dtools= -Dtests=false -Dextra=
 ninja -C "$src/thorvg/build" install

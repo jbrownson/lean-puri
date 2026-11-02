@@ -8,7 +8,7 @@ def depsDir (pkg : Package) : FilePath := pkg.dir / "deps" / "install"
 
 package «lean-puri» where
   moreLinkArgs := #[
-    "-Ldeps/install/lib", "-lSDL3", "-lthorvg",
+    "-Ldeps/install/lib", "-lSDL3", "-lthorvg-1",
     "-Wl,-rpath,$ORIGIN/../../../deps/install/lib",
     "-Wl,--allow-shlib-undefined"]
 
