@@ -14,9 +14,18 @@ package «lean-puri» where
 
 lean_lib Puri
 
+/-- The long list that the demo shows and the benchmark measures. -/
+lean_lib Example
+
 @[default_target]
 lean_exe demo where
   root := `Demo
+
+/-- Measures the incremental view against drawing the whole window, with no
+display: see scripts/bench.sh. -/
+@[default_target]
+lean_exe bench where
+  root := `Bench
 
 target platform.o pkg : FilePath := do
   let oFile := pkg.buildDir / "native" / "platform.o"
