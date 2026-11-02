@@ -23,6 +23,8 @@ structure App where
   rows : Rows
   width : Float
   mouse : Float × Float := (0, 0)
+  /-- The pointer is in the window. -/
+  pointer : Bool := false
   /-- Draw the whole window each frame, instead of rendering edits. -/
   whole : Bool := false
   /-- Points to scroll each frame when scrolling by itself; 0 when not. -/
@@ -60,11 +62,19 @@ def scroll (app : App) (dy : Float) : App := { app with pending := app.pending +
 
 def listEdit (app : App) (e : Edit.of items) : App := app.flush.edit (.list e)
 
-/-- The item under the pointer, if any. -/
-def hovered (app : App) : Option Nat := app.view.rowAt app.mouse.2
+/-- The item under the pointer, if any: not when the pointer has left the
+window, or is over the scroll bar. -/
+def hovered (app : App) : Option Nat :=
+  if !app.pointer || app.mouse.1 ≥ app.width - 14 then .none else app.view.rowAt app.mouse.2
 
-def key (app : App) (k : UInt32) : App :=
-  let page := Float.ofInt app.view.height - 44
+/-- Brings the scroll back onto the list if it has fallen off the end: after
+the window grows, or the list shrinks while scrolled to its bottom. -/
+def settle (app : App) : App :=
+  let dy := app.view.clamp 0
+  if dy == 0 then app else app.edit (.scroll dy)
+
+def key (app : App) (k : UInt32) (isRepeat : Bool) : App :=
+  let page := max 44 (Float.ofInt app.view.height - 44)
   match k with
   | 0x40000051 => app.scroll 44                      -- down
   | 0x40000052 => app.scroll (-44)                   -- up
@@ -79,21 +89,28 @@ def key (app : App) (k : UInt32) : App :=
     match app.hovered with
     | .some i => app.listEdit (.delete i)
     | .none => app
-  | 0x77 => { app with whole := !app.whole, refill := app.whole, dirty := true }  -- w
-  | 0x61 => { app with auto := if app.auto == 0 then 6 else 0 }                     -- a
+  | 0x77 =>                                           -- w
+    if isRepeat then app else { app with whole := !app.whole, refill := app.whole, dirty := true }
+  | 0x61 =>                                           -- a
+    if isRepeat then app else { app with auto := if app.auto == 0 then 6 else 0 }
   | 0x71 | 0x1B => { app with quit := true }                                       -- q, escape
   | _ => app
 
 def event (app : App) : Event → App
   | .quit => { app with quit := true }
-  | .move x y => { app with mouse := (x, y) }
+  | .move x y => { app with mouse := (x, y), pointer := true }
+  | .leave => { app with pointer := false }
   | .down x y 1 =>
-    let app := { app with mouse := (x, y) }
+    let app := { app with mouse := (x, y), pointer := true }
     match app.hovered with
     | .some i => app.listEdit (.update i .toggle)
     | .none => app
-  | .wheel x y _ dy => { app with mouse := (x, y) }.scroll (-dy * 48)
-  | .keyDown k _ _ => app.key k
+  | .wheel x y _ dy =>
+    -- A wheel's notches come as whole numbers; a trackpad's precise
+    -- movement comes as fractions, about a tenth of a point each.
+    let perUnit : Float := if dy == dy.round then 48 else 10
+    { app with mouse := (x, y), pointer := true }.scroll (-dy * perUnit)
+  | .keyDown k isRepeat _ => app.key k isRepeat
   | .resized width height =>
     { app with width := width.toNat.toFloat, view := { app.view with height := height.toNat }, refill := true,
                dirty := true }
@@ -131,9 +148,9 @@ def main : IO Unit := do
   let mut work := 0
   let mut since ← IO.monoNanosNow
   repeat
-    let events ← w.wait (if app.auto != 0 then 0 else 500)
+    let events ← w.wait (if app.auto != 0 || app.dirty then 0 else 500)
     let t0 ← IO.monoNanosNow
-    app := (events.foldl App.event app).flush.autoStep
+    app := (events.foldl App.event app).flush.settle.autoStep
     if app.quit then break
     if app.dirty then
       app ← app.draw w

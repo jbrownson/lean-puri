@@ -180,6 +180,8 @@ inductive Event where
   | resized (width height : UInt32)
   | wheel (x y dx dy : Float)
   | exposed
+  /-- The pointer left the window. -/
+  | leave
   deriving Repr
 
 private def float (u : UInt32) : Float := (Float32.ofBits u).toFloat
@@ -210,6 +212,7 @@ partial def decode (ws : Array UInt32) (i : Nat := 0) (acc : Array Event := #[])
   | 8 => decode ws (i+5) (acc.push (.resized a b))
   | 9 => decode ws (i+5) (acc.push (.wheel (float a) (float b) (float c) (float d)))
   | 10 => decode ws (i+5) (acc.push .exposed)
+  | 11 => decode ws (i+5) (acc.push .leave)
   | _ => decode ws (i+5) acc
 
 /-- Waits for events, `timeoutMs` at most (negative: no deadline). -/

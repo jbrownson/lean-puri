@@ -89,18 +89,22 @@ static float scale_of(PuriWindow* w) {
 }
 
 // Matches the frame's pixels to the window's size, which may have changed.
-static void fit_target(PuriWindow* w) {
+// False if it couldn't.
+static int fit_target(PuriWindow* w) {
   int pw = w->pw, ph = w->ph;
   if (w->window) SDL_GetWindowSizeInPixels(w->window, &pw, &ph);
-  if (pw == w->pw && ph == w->ph && w->pixels != NULL) return;
+  if (pw == w->pw && ph == w->ph && w->pixels != NULL) return 1;
   free(w->pixels);
   w->pw = pw; w->ph = ph;
   w->pixels = malloc((size_t)pw * ph * 4);
+  if (!w->pixels) { w->pw = w->ph = 0; return 0; }
   if (w->window) {
     if (w->texture) SDL_DestroyTexture(w->texture);
     w->texture = SDL_CreateTexture(w->renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, pw, ph);
+    if (!w->texture) return 0;
   }
   tvg_swcanvas_set_target(w->canvas, w->pixels, pw, pw, ph, TVG_COLORSPACE_ARGB8888);
+  return 1;
 }
 
 LEAN_EXPORT lean_obj_res puri_window_open(b_lean_obj_arg title, uint32_t width, uint32_t height,
@@ -164,7 +168,7 @@ LEAN_EXPORT lean_obj_res puri_window_set_title(b_lean_obj_arg win, b_lean_obj_ar
 // ------
 // Five words per event: kind, then four arguments (floats as their bits).
 
-enum { EV_QUIT = 1, EV_MOVE, EV_DOWN, EV_UP, EV_KEY_DOWN, EV_KEY_UP, EV_TEXT, EV_RESIZED, EV_WHEEL, EV_EXPOSED };
+enum { EV_QUIT = 1, EV_MOVE, EV_DOWN, EV_UP, EV_KEY_DOWN, EV_KEY_UP, EV_TEXT, EV_RESIZED, EV_WHEEL, EV_EXPOSED, EV_LEAVE };
 
 static uint32_t fbits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 
@@ -174,6 +178,14 @@ static lean_object* push(lean_object* arr, uint32_t k, uint32_t a, uint32_t b, u
   arr = lean_array_push(arr, lean_box_uint32(b));
   arr = lean_array_push(arr, lean_box_uint32(c));
   return lean_array_push(arr, lean_box_uint32(d));
+}
+
+// A resize, with the window's size in points.
+static lean_object* push_size(lean_object* arr, SDL_WindowID id) {
+  int w = 0, h = 0;
+  SDL_Window* win = SDL_GetWindowFromID(id);
+  if (win) SDL_GetWindowSize(win, &w, &h);
+  return push(arr, EV_RESIZED, (uint32_t)w, (uint32_t)h, 0, 0);
 }
 
 static lean_object* encode(lean_object* arr, SDL_Event* e) {
@@ -204,11 +216,15 @@ static lean_object* encode(lean_object* arr, SDL_Event* e) {
     }
     case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-    case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: {
-      int w, h;
-      SDL_GetWindowSize(SDL_GetWindowFromID(e->window.windowID), &w, &h);
-      return push(arr, EV_RESIZED, (uint32_t)w, (uint32_t)h, 0, 0);
-    }
+    case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+      return push_size(arr, e->window.windowID);
+    // The renderer lost its textures: everything retained must be drawn
+    // again, as after a resize.
+    case SDL_EVENT_RENDER_TARGETS_RESET:
+    case SDL_EVENT_RENDER_DEVICE_RESET:
+      return push_size(arr, e->render.windowID);
+    case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+      return push(arr, EV_LEAVE, 0, 0, 0, 0);
     case SDL_EVENT_WINDOW_EXPOSED:
       return push(arr, EV_EXPOSED, 0, 0, 0, 0);
     case SDL_EVENT_MOUSE_WHEEL:
@@ -272,7 +288,7 @@ static void add_text(Tvg_Paint scene, float x, float y, float size, uint32_t rgb
 // Starts a frame at the window's current size, cleared to bg (0xRRGGBBAA).
 LEAN_EXPORT lean_obj_res puri_frame_begin(b_lean_obj_arg win, uint32_t bg, lean_obj_arg world) {
   PuriWindow* w = window_of(win);
-  fit_target(w);
+  if (!fit_target(w)) return io_error("the window's frame");
   tvg_canvas_remove(w->canvas, NULL);
   w->root = tvg_scene_new();
   float s = scale_of(w);
@@ -381,13 +397,15 @@ LEAN_EXPORT lean_obj_res puri_rows_new(b_lean_obj_arg win, uint32_t bg, lean_obj
 // Starts painting a row height points tall, on the background.
 LEAN_EXPORT lean_obj_res puri_rows_begin(b_lean_obj_arg rows, uint32_t height, lean_obj_arg world) {
   PuriRows* r = rows_of(rows);
-  fit_target(r->win);
+  if (!fit_target(r->win)) return io_error("the window's frame");
   if (r->pending) tvg_paint_rel(r->pending);
   float s = scale_of(r->win);
   r->pending = tvg_scene_new();
   tvg_paint_scale(r->pending, s);
   r->pending_h = (int32_t)height;
-  add_round_rect(r->pending, 0, 0, r->win->pw / s, (float)height, 0, r->bg);
+  // The background covers every pixel of the row, which is ceil(height * s)
+  // pixels tall, so at a fractional scale its last line isn't left clear.
+  add_round_rect(r->pending, 0, 0, r->win->pw / s, ceilf(height * s) / s, 0, r->bg);
   return io_unit();
 }
 
@@ -406,9 +424,11 @@ LEAN_EXPORT lean_obj_res puri_rows_fill_text(b_lean_obj_arg rows, double x, doub
 }
 
 // Draws the pending row into its own pixels: a texture on a window, memory
-// offscreen. The row keeps no top; the caller sets it.
-static Row rows_draw(PuriRows* r) {
+// offscreen. The row keeps no top; the caller sets it. Sets *ok to 0 if the
+// pixels couldn't be had.
+static Row rows_draw(PuriRows* r, int* ok) {
   Row row = {0};
+  *ok = 1;
   PuriWindow* w = r->win;
   int pw = w->pw;
   int ph = (int)ceilf(r->pending_h * scale_of(w));
@@ -420,10 +440,20 @@ static Row rows_draw(PuriRows* r) {
   size_t need = (size_t)pw * ph;
   uint32_t* px;
   if (w->window) {
-    if (r->scratch_cap < need) { free(r->scratch); r->scratch = malloc(need * 4); r->scratch_cap = need; }
+    if (r->scratch_cap < need) {
+      free(r->scratch);
+      r->scratch = malloc(need * 4);
+      r->scratch_cap = r->scratch ? need : 0;
+    }
     px = r->scratch;
   } else {
     px = malloc(need * 4);
+  }
+  if (!px) {
+    tvg_paint_rel(r->pending);
+    r->pending = NULL;
+    *ok = 0;
+    return row;
   }
   tvg_swcanvas_set_target(r->canvas, px, pw, pw, ph, TVG_COLORSPACE_ARGB8888);
   tvg_canvas_add(r->canvas, r->pending);
@@ -436,6 +466,7 @@ static Row rows_draw(PuriRows* r) {
   row.pw = pw; row.ph = ph;
   if (w->window) {
     row.tex = SDL_CreateTexture(w->renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, pw, ph);
+    if (!row.tex) { *ok = 0; return row; }
     SDL_SetTextureBlendMode(row.tex, SDL_BLENDMODE_NONE);
     SDL_UpdateTexture(row.tex, NULL, px, pw * 4);
   } else {
@@ -448,17 +479,22 @@ static Row rows_draw(PuriRows* r) {
 // the end, it is appended.
 LEAN_EXPORT lean_obj_res puri_rows_insert(b_lean_obj_arg rows, uint32_t k, int32_t top, lean_obj_arg world) {
   PuriRows* r = rows_of(rows);
-  Row row = rows_draw(r);
+  int ok;
+  Row row = rows_draw(r, &ok);
   row.top = top - r->base;
   if (r->n == r->cap) {
-    r->cap = r->cap ? r->cap * 2 : 64;
-    r->rows = realloc(r->rows, r->cap * sizeof(Row));
+    size_t cap = r->cap ? r->cap * 2 : 64;
+    Row* rows2 = realloc(r->rows, cap * sizeof(Row));
+    if (!rows2) { row_free(&row); return io_error("placing a row"); }
+    r->rows = rows2;
+    r->cap = cap;
   }
   size_t at = k < r->n ? k : r->n;
   memmove(&r->rows[at + 1], &r->rows[at], (r->n - at) * sizeof(Row));
   r->rows[at] = row;
   r->n++;
-  return io_unit();
+  // The row is placed even without its pixels, so positions stay right.
+  return ok ? io_unit() : io_error("drawing a row");
 }
 
 // The row at position k becomes the pending row, keeping its top.
@@ -469,11 +505,12 @@ LEAN_EXPORT lean_obj_res puri_rows_update(b_lean_obj_arg rows, uint32_t k, lean_
     r->pending = NULL;
     return io_unit();
   }
-  Row row = rows_draw(r);
+  int ok;
+  Row row = rows_draw(r, &ok);
   row.top = r->rows[k].top;
   row_free(&r->rows[k]);
   r->rows[k] = row;
-  return io_unit();
+  return ok ? io_unit() : io_error("drawing a row");
 }
 
 // The row at position k leaves.
@@ -541,7 +578,7 @@ LEAN_EXPORT lean_obj_res puri_rows_compose(b_lean_obj_arg rows, double bx, doubl
   PuriWindow* w = r->win;
   float s = scale_of(w);
   if (w->window) {
-    fit_target(w);
+    if (!fit_target(w)) return io_error("the window's frame");
     uint8_t cr, cg, cb, ca;
     color(r->bg, &cr, &cg, &cb, &ca);
     SDL_SetRenderDrawColor(w->renderer, cr, cg, cb, ca);
@@ -648,7 +685,7 @@ LEAN_EXPORT lean_obj_res puri_use_offscreen_video(lean_obj_arg world) {
 LEAN_EXPORT lean_obj_res puri_window_read_back(b_lean_obj_arg win, lean_obj_arg world) {
   PuriWindow* w = window_of(win);
   if (!w->window) return io_unit();
-  fit_target(w);
+  if (!fit_target(w)) return io_error("the window's frame");
   SDL_Surface* s = SDL_RenderReadPixels(w->renderer, NULL);
   if (!s) return io_error("SDL_RenderReadPixels");
   SDL_Surface* c = SDL_ConvertSurface(s, SDL_PIXELFORMAT_ARGB8888);
