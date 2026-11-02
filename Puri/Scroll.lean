@@ -8,61 +8,15 @@ touches only the rows that enter or leave, and positions are worked out only
 for the rows that show. Edits outside the window don't move what shows: a
 row inserted above the anchor moves the scroll offset down with it, as
 browsers' scroll anchoring does.
+
+Two outputs are kept up to date, each an `Inc` with its law: `view`, the
+drawing of the rows that show (`Puri/Drawing.lean`), and `extent`, how far
+the list is scrolled and how tall it is, which is what a scroll bar shows.
+The laws are at the end of the file.
 -/
-import Puri.List
+import Puri.Drawing
 
 namespace Puri
-
-/-! ## Drawings -/
-
-/-- A row at a height: its top, in points down from the window's top. -/
-structure Placed (R : Type) where
-  top : Int
-  row : R
-
-/-- A placed row moved down by `dy`, or up if `dy` is negative. -/
-def Placed.move {R : Type} (p : Placed R) (dy : Int) : Placed R := ⟨p.top + dy, p.row⟩
-
-namespace Drawing
-
-/-- An edit of a drawing, a list of placed rows from the top. Positions count
-rows from 0. -/
-inductive Edit (R : Type) where
-  /-- Every row moves down by `dy`, or up if `dy` is negative. -/
-  | translate (dy : Int)
-  /-- The rows from position `k` on move down by `dy`. -/
-  | shift (k : Nat) (dy : Int)
-  /-- A placed row enters at position `k`. -/
-  | insert (k : Nat) (p : Placed R)
-  /-- The row at position `k` leaves. -/
-  | delete (k : Nat)
-  /-- The row at position `k` becomes `r`, keeping its top. -/
-  | update (k : Nat) (r : R)
-
-/-- The rows from position `k` on, moved down by `dy`. -/
-def shiftFrom {R : Type} (dy : Int) : Nat → List (Placed R) → List (Placed R)
-  | 0, ps => ps.map (·.move dy)
-  | _ + 1, [] => []
-  | k + 1, p :: ps => p :: shiftFrom dy k ps
-
-/-- The row at position `k` replaced by `r`, at the same top. -/
-def setRow {R : Type} (r : R) : Nat → List (Placed R) → List (Placed R)
-  | _, [] => []
-  | 0, p :: ps => ⟨p.top, r⟩ :: ps
-  | k + 1, p :: ps => p :: setRow r k ps
-
-/-- The drawing after one edit. -/
-def edit {R : Type} : Edit R → List (Placed R) → List (Placed R)
-  | .translate dy, ps => ps.map (·.move dy)
-  | .shift k dy, ps => shiftFrom dy k ps
-  | .insert k p, ps => Puri.insert ps k p
-  | .delete k, ps => remove ps k
-  | .update k r, ps => setRow r k ps
-
-/-- How drawings are edited, one edit at a time. -/
-abbrev editStructure (R : Type) : EditStructure := ⟨List (Placed R), Edit R, edit⟩
-
-end Drawing
 
 /-! ## Placing rows -/
 
@@ -85,6 +39,11 @@ above the bottom of a window of height `H`. -/
 def window (y : Int) : List R → List (Placed R)
   | [] => []
   | r :: rs => if y < H then ⟨y, r⟩ :: window (y + h r) rs else []
+
+/-- How many rows `window` places, without placing them. -/
+def count (y : Int) : List R → Nat
+  | [] => 0
+  | r :: rs => if y < H then count (y + h r) rs + 1 else 0
 
 /-- A placed row shows in a window of height `H` if it ends below the
 window's top and starts above its bottom. -/
@@ -112,6 +71,11 @@ def rows (z : Scroll R) : List R := z.above.reverse ++ z.rest
 
 /-- How far the list's top is above the window's top. -/
 def offset (h : R → Nat) (z : Scroll R) : Int := height h z.above + z.off
+
+/-- The row at position `i` of the list, found from the anchor. -/
+def get? (z : Scroll R) (i : Nat) : Option R :=
+  let a := z.above.length
+  if i < a then z.above[a - 1 - i]? else z.rest[i - a]?
 
 /-- Moves the anchor down past the rows that end above the window's top. -/
 def push (h : R → Nat) (above : List R) : List R → Int → Scroll R
@@ -182,13 +146,17 @@ def dropAll (k : Nat) : Nat → List R → List (Drawing.Edit R)
   | _ + 1, [] => []
   | m + 1, _ :: rs => .delete k :: dropAll k m rs
 
-/-- From position `k`, takes the first `m` of `rs`, placed from `y`, to
-`window h H y rs`: rows that start below the window leave, and rows that
-now start above its bottom enter. -/
-def fit (k : Nat) (y : Int) : Nat → List R → List (Drawing.Edit R)
-  | _, [] => []
-  | 0, r :: rs => if y < H then .insert k ⟨y, r⟩ :: fit (k + 1) (y + h r) 0 rs else []
-  | m + 1, r :: rs => if y < H then fit (k + 1) (y + h r) m rs else dropAll k (m + 1) (r :: rs)
+/-- The edits from what the drawing holds at position `k` on to
+`window h H y rs`, when it holds the `m` rows of `rs` that follow the first
+`p`, placed as they are in `rs` from `y`. The first `p` rows are new: each
+enters while it starts above the window's bottom. The drawn rows that now
+start below the bottom leave, and the rows after them that start above it
+enter. -/
+def fit (k : Nat) (y : Int) : Nat → Nat → List R → List (Drawing.Edit R)
+  | _, _, [] => []
+  | p + 1, m, r :: rs => if y < H then .insert k ⟨y, r⟩ :: fit (k + 1) (y + h r) p m rs else dropAll k m (rs.drop p)
+  | 0, 0, r :: rs => if y < H then .insert k ⟨y, r⟩ :: fit (k + 1) (y + h r) 0 0 rs else []
+  | 0, m + 1, r :: rs => if y < H then fit (k + 1) (y + h r) 0 m rs else dropAll k (m + 1) (r :: rs)
 
 /-- `Scroll.push`'s edits, from the first `m` of `rest` placed from `-off`:
 each row it moves above leaves the top. -/
@@ -196,19 +164,20 @@ def push (m : Nat) : List R → Int → List (Drawing.Edit R)
   | [], _ => []
   | r :: rs, off =>
     if (h r : Int) ≤ off then (if m = 0 then [] else [.delete 0]) ++ push (m - 1) rs (off - h r)
-    else fit h H 0 (-off) m (r :: rs)
+    else fit h H 0 (-off) 0 m (r :: rs)
 
-/-- `Scroll.pull`'s edits: each row it moves back enters at the top. -/
-def pull (m : Nat) (rest : List R) : List R → Int → List (Drawing.Edit R)
-  | [], off => fit h H 0 (-off) m rest
+/-- `Scroll.pull`'s edits: it counts the rows it moves back, `p`, and `fit`
+enters those that show at the top. -/
+def pull (p m : Nat) (rest : List R) : List R → Int → List (Drawing.Edit R)
+  | [], off => fit h H 0 (-off) p m rest
   | r :: above, off =>
-    if off < 0 then .insert 0 ⟨-(off + h r), r⟩ :: pull (m + 1) (r :: rest) above (off + h r)
-    else fit h H 0 (-off) m rest
+    if off < 0 then pull (p + 1) m (r :: rest) above (off + h r)
+    else fit h H 0 (-off) p m rest
 
 /-- From the first `m` rows of `z.rest` placed from `-z.off`, to `z`'s
 drawing: normalizing's edits, then `fit`'s. -/
 def settle (m : Nat) (z : Scroll R) : List (Drawing.Edit R) :=
-  if z.off < 0 then pull h H m z.rest z.above z.off else push h H m z.rest z.off
+  if z.off < 0 then pull h H 0 m z.rest z.above z.off else push h H m z.rest z.off
 
 end
 
@@ -244,7 +213,7 @@ rows that enter or leave. -/
 def df (ca : EditStructure) (h : ca.Value → Nat) (H : Int) (z : Scroll ca.Value) (e : Scroll.Edit ca) :
     List (Drawing.Edit ca.Value) :=
   let n := Scroll.normalize h z
-  let c := core ca h n (window h H (-n.off) n.rest).length e
+  let c := core ca h n (count h H (-n.off) n.rest) e
   c.1 ++ settle h H c.2 (Scroll.step ca e n)
 
 end view
@@ -259,6 +228,58 @@ def view (ca : EditStructure) (h : ca.Value → Nat) (H : Int) :
 def view.inc (ca : EditStructure) (h : ca.Value → Nat) (H : Int) :
     Inc (runs (Scroll.editStructure ca h)) (runs (Drawing.editStructure ca.Value)) :=
   lift (view ca h H)
+
+/-! ## The extent -/
+
+/-- What a scroll bar shows: how far the list's top is above the window's
+top, and how tall the list is, in points. -/
+structure Extent where
+  offset : Int
+  height : Int
+  deriving DecidableEq, Repr
+
+/-- An extent's edit: amounts added to its offset and its height. -/
+abbrev Extent.edits : EditStructure :=
+  ⟨Extent, Int × Int, fun d x => ⟨x.offset + d.1, x.height + d.2⟩⟩
+
+/-- Where a list edit acts. -/
+def Edit.pos {A DA : Type} : Edit A DA → Nat
+  | .insert i _ => i
+  | .delete i => i
+  | .update i _ => i
+
+/-- How much taller a list edit makes the list of `n` (shorter, if
+negative): an insert adds its row's height, a delete takes away the deleted
+row's, and an update adds the change in its row's. -/
+def grows (ca : EditStructure) (h : ca.Value → Nat) (n : Scroll ca.Value) : Edit.of ca → Int
+  | .insert _ x => h x
+  | .delete i =>
+    match n.get? i with
+    | .some x => -(h x : Int)
+    | .none => 0
+  | .update i d =>
+    match n.get? i with
+    | .some x => (h (ca.apply d x) : Int) - h x
+    | .none => 0
+
+/-- The extent of a scrolled list. -/
+def Scroll.extent {R : Type} (h : R → Nat) (z : Scroll R) : Extent :=
+  ⟨z.offset h, height h z.rows⟩
+
+/-- The extent's derivative. Scrolling moves the offset. A list edit grows
+the list, and moves the offset too if it is before the anchor, so that what
+shows stays put. -/
+def extent.df (ca : EditStructure) (h : ca.Value → Nat) (z : Scroll ca.Value) : Scroll.Edit ca → Int × Int
+  | .scroll dy => (dy, 0)
+  | .list e =>
+    let n := Scroll.normalize h z
+    let g := grows ca h n e
+    (if e.pos < n.above.length then g else 0, g)
+
+/-- The extent, as an incremental function of the list's edits and the
+scroll. -/
+def extent (ca : EditStructure) (h : ca.Value → Nat) : Inc (Scroll.editStructure ca h) Extent.edits :=
+  ⟨Scroll.extent h, extent.df ca h⟩
 
 /-! ## Proof steps: list edits by position -/
 
@@ -450,29 +471,55 @@ theorem dropAll_ok (pre : List (Placed R)) (y : Int) (m : Nat) (rs : List R) :
       rw [remove_append_length]
       exact ih _ _
 
-theorem fit_ok (pre : List (Placed R)) (y : Int) (m : Nat) (rs : List R) :
-    run (Drawing.editStructure R) (view.fit h H pre.length y m rs) (pre ++ place h y (rs.take m)) = pre ++ window h H y rs := by
-  induction rs generalizing pre y m with
-  | nil => cases m <;> simp [view.fit, place, window, run]
+theorem fit_ok (pre : List (Placed R)) (y : Int) (p m : Nat) (rs : List R) :
+    run (Drawing.editStructure R) (view.fit h H pre.length y p m rs)
+      (pre ++ place h (y + height h (rs.take p)) ((rs.drop p).take m)) = pre ++ window h H y rs := by
+  induction rs generalizing pre y p m with
+  | nil => cases p <;> cases m <;> simp [view.fit, place, window, run]
   | cons r rs ih =>
     by_cases hy : y < H
-    · cases m with
+    · have step : ∀ p' m' (d : List (Placed R)),
+          run (Drawing.editStructure R) (view.fit h H (pre.length + 1) (y + h r) p' m' rs)
+            (pre ++ ⟨y, r⟩ :: d) = pre ++ window h H y (r :: rs) →
+          run (Drawing.editStructure R) (view.fit h H (pre.length + 1) (y + h r) p' m' rs)
+            (pre ++ ⟨y, r⟩ :: d) = pre ++ window h H y (r :: rs) := fun _ _ _ x => x
+      have ih' := fun p' m' => ih (pre ++ [⟨y, r⟩]) (y + h r) p' m'
+      simp only [List.length_append, List.length_singleton, List.append_assoc, List.singleton_append] at ih'
+      cases p with
+      | succ p =>
+        simp only [view.fit, hy, ite_true, window, List.take_succ_cons, List.drop_succ_cons, height]
+        show run (Drawing.editStructure R) (view.fit h H (pre.length + 1) (y + h r) p m rs)
+          (insert (pre ++ place h (y + ↑(h r + height h (rs.take p))) ((rs.drop p).take m)) pre.length ⟨y, r⟩) = _
+        rw [insert_append_length, show y + ↑(h r + height h (rs.take p)) = y + ↑(h r) + ↑(height h (rs.take p)) by omega]
+        exact ih' p m
       | zero =>
-        simp only [view.fit, hy, ite_true, window]
-        show run (Drawing.editStructure R) (view.fit h H (pre.length + 1) (y + h r) 0 rs)
-          (insert (pre ++ []) pre.length ⟨y, r⟩) = _
-        rw [insert_append_length]
-        have := ih (pre ++ [⟨y, r⟩]) (y + h r) 0
-        simpa [place] using this
-      | succ m =>
-        simp only [view.fit, hy, ite_true, window, List.take_succ_cons, place]
-        have := ih (pre ++ [⟨y, r⟩]) (y + h r) m
-        simpa using this
-    · cases m with
-      | zero => simp [view.fit, hy, window, place, run]
-      | succ m =>
-        simp only [view.fit, hy, ite_false, window, List.append_nil]
-        exact dropAll_ok h pre y (m + 1) (r :: rs)
+        cases m with
+        | zero =>
+          simp only [view.fit, hy, ite_true, window]
+          show run (Drawing.editStructure R) (view.fit h H (pre.length + 1) (y + h r) 0 0 rs)
+            (insert (pre ++ []) pre.length ⟨y, r⟩) = _
+          rw [insert_append_length]
+          simpa [place] using ih' 0 0
+        | succ m =>
+          simp only [view.fit, hy, ite_true, window, List.take_zero, List.drop_zero, List.take_succ_cons, place,
+            height, Int.natCast_zero, Int.add_zero]
+          simpa [place, height] using ih' 0 m
+    · cases p with
+      | succ p =>
+        simp only [view.fit, hy, ite_false, window, List.append_nil, List.take_succ_cons, List.drop_succ_cons]
+        exact dropAll_ok h pre _ m (rs.drop p)
+      | zero =>
+        cases m with
+        | zero => simp [view.fit, hy, window, place, run]
+        | succ m =>
+          simp only [view.fit, hy, ite_false, window, List.append_nil, List.take_zero, List.drop_zero, height,
+            Int.natCast_zero, Int.add_zero]
+          exact dropAll_ok h pre y (m + 1) (r :: rs)
+
+/-- `fit` with no new rows, from the start of the drawing. -/
+theorem fit_ok' (y : Int) (m : Nat) (rs : List R) :
+    run (Drawing.editStructure R) (view.fit h H 0 y 0 m rs) (place h y (rs.take m)) = window h H y rs := by
+  simpa [height] using fit_ok h H [] y 0 m rs
 
 theorem push_ok (above : List R) (m : Nat) (rs : List R) (off : Int) :
     run (Drawing.editStructure R) (view.push h H m rs off) (place h (-off) (rs.take m)) =
@@ -491,38 +538,39 @@ theorem push_ok (above : List R) (m : Nat) (rs : List R) (off : Int) :
         rw [show -off + ↑(h r) = -(off - ↑(h r)) by omega]
         exact ih (r :: above) m (off - h r)
     · simp only [view.push, Scroll.push, hr, ite_false]
-      simpa using fit_ok h H [] (-off) m (r :: rs)
+      exact fit_ok' h H (-off) m (r :: rs)
 
-theorem pull_ok (m : Nat) (rest above : List R) (off : Int) :
-    run (Drawing.editStructure R) (view.pull h H m rest above off) (place h (-off) (rest.take m)) =
+theorem pull_ok (p m : Nat) (rest above : List R) (off : Int) :
+    run (Drawing.editStructure R) (view.pull h H p m rest above off)
+      (place h (-off + height h (rest.take p)) ((rest.drop p).take m)) =
       window h H (-(Scroll.pull h rest above off).off) (Scroll.pull h rest above off).rest := by
-  induction above generalizing m rest off with
+  induction above generalizing p rest off with
   | nil =>
     simp only [view.pull, Scroll.pull]
-    simpa using fit_ok h H [] (-off) m rest
+    simpa using fit_ok h H [] (-off) p m rest
   | cons r above ih =>
     by_cases ho : off < 0
     · simp only [view.pull, Scroll.pull, ho, ite_true]
-      show run (Drawing.editStructure R) (view.pull h H (m + 1) (r :: rest) above (off + h r))
-        (insert (place h (-off) (rest.take m)) 0 ⟨-(off + h r), r⟩) = _
-      rw [insert_zero]
-      have : (⟨-(off + h r), r⟩ :: place h (-off) (rest.take m) : List (Placed R)) =
-          place h (-(off + h r)) ((r :: rest).take (m + 1)) := by
-        simp only [List.take_succ_cons, place]
-        rw [show -(off + ↑(h r)) + ↑(h r) = -off by omega]
-      rw [this]
-      exact ih _ _ _
+      have := ih (p + 1) (r :: rest) (off + h r)
+      simp only [List.take_succ_cons, List.drop_succ_cons, height] at this
+      rw [show -(off + ↑(h r)) + ↑(h r + height h (rest.take p)) = -off + ↑(height h (rest.take p)) by omega] at this
+      exact this
     · simp only [view.pull, Scroll.pull, ho, ite_false]
-      simpa using fit_ok h H [] (-off) m rest
+      simpa using fit_ok h H [] (-off) p m rest
 
 theorem settle_ok (m : Nat) (z : Scroll R) :
     run (Drawing.editStructure R) (view.settle h H m z) (place h (-z.off) (z.rest.take m)) = Scroll.draw h H z := by
   unfold view.settle Scroll.draw Scroll.normalize
   by_cases ho : z.off < 0
   · simp only [ho, ite_true]
-    exact pull_ok h H m z.rest z.above z.off
+    simpa [height] using pull_ok h H 0 m z.rest z.above z.off
   · simp only [ho, ite_false]
     exact push_ok h H z.above m z.rest z.off
+
+theorem count_eq (y : Int) (rs : List R) : count h H y rs = (window h H y rs).length := by
+  induction rs generalizing y with
+  | nil => rfl
+  | cons r rs ih => by_cases hy : y < H <;> simp [count, window, hy, ih]
 
 /-! ## Proof steps: normalizing -/
 
@@ -922,6 +970,111 @@ theorem window_of_shape (n : Scroll R) (hn : normalShape h n) :
 
 end
 
+/-! ## Proof steps: the extent -/
+
+section
+variable {R : Type} (h : R → Nat)
+
+theorem remove_past (xs : List R) (j : Nat) (hj : xs.length ≤ j) : remove xs j = xs := by
+  induction xs generalizing j with
+  | nil => rfl
+  | cons y t ih =>
+    cases j with
+    | zero => simp at hj
+    | succ j =>
+      show y :: remove t j = y :: t
+      rw [ih j (by simp at hj; omega)]
+
+theorem height_insert (xs : List R) (j : Nat) (x : R) : height h (insert xs j x) = height h xs + h x := by
+  induction xs generalizing j with
+  | nil => simp [insert, height]
+  | cons y t ih => cases j <;> simp [insert, height, ih] <;> omega
+
+theorem height_remove (xs : List R) (j : Nat) (x : R) (hx : xs[j]? = some x) :
+    height h (remove xs j) + h x = height h xs := by
+  induction xs generalizing j with
+  | nil => simp at hx
+  | cons y t ih =>
+    cases j with
+    | zero =>
+      simp at hx
+      subst hx
+      simp [remove, height]
+      omega
+    | succ j =>
+      simp at hx
+      have := ih j hx
+      simp [remove, height]
+      omega
+
+end
+
+theorem height_update (ca : EditStructure) (h : ca.Value → Nat) (xs : List ca.Value) (j : Nat) (x : ca.Value)
+    (d : ca.Edit) (hx : xs[j]? = some x) :
+    height h (update ca xs j d) + h x = height h xs + h (ca.apply d x) := by
+  induction xs generalizing j with
+  | nil => simp at hx
+  | cons y t ih =>
+    cases j with
+    | zero =>
+      simp at hx
+      subst hx
+      simp [update, height]
+      omega
+    | succ j =>
+      simp at hx
+      have := ih j hx
+      simp [update, height]
+      omega
+
+/-- A list edit's effect on the extent, before normalizing. -/
+theorem extent_edit (ca : EditStructure) (h : ca.Value → Nat) (e : Edit.of ca) (n : Scroll ca.Value) :
+    (Scroll.edit ca e n).extent h =
+      Extent.edits.apply (if e.pos < n.above.length then grows ca h n e else 0, grows ca h n e) (n.extent h) := by
+  obtain ⟨above, rest, off⟩ := n
+  simp only [Scroll.extent, Scroll.offset, Scroll.rows, height_append, height_reverse, Extent.mk.injEq]
+  cases e with
+  | insert i x =>
+    by_cases hi : i < above.length
+    · simp only [Scroll.edit, hi, ite_true, Edit.pos, grows, height_insert]
+      omega
+    · simp only [Scroll.edit, hi, ite_false, Edit.pos, grows, height_insert]
+      omega
+  | delete i =>
+    by_cases hi : i < above.length
+    · obtain ⟨x, hx⟩ : ∃ x, above[above.length - 1 - i]? = some x :=
+        ⟨_, List.getElem?_eq_getElem (by omega)⟩
+      have := height_remove h above _ x hx
+      simp only [Scroll.edit, hi, ite_true, Edit.pos, grows, Scroll.get?, hx]
+      omega
+    · simp only [Scroll.edit, hi, ite_false, Edit.pos, grows, Scroll.get?]
+      cases hx : rest[i - above.length]? with
+      | none =>
+        rw [remove_past rest _ (List.getElem?_eq_none_iff.mp hx)]
+        simp only
+        omega
+      | some x =>
+        have := height_remove h rest _ x hx
+        simp only
+        omega
+  | update i d =>
+    by_cases hi : i < above.length
+    · obtain ⟨x, hx⟩ : ∃ x, above[above.length - 1 - i]? = some x :=
+        ⟨_, List.getElem?_eq_getElem (by omega)⟩
+      have := height_update ca h above _ x d hx
+      simp only [Scroll.edit, hi, ite_true, Edit.pos, grows, Scroll.get?, hx]
+      omega
+    · simp only [Scroll.edit, hi, ite_false, Edit.pos, grows, Scroll.get?]
+      cases hx : rest[i - above.length]? with
+      | none =>
+        rw [update_past rest _ (List.getElem?_eq_none_iff.mp hx)]
+        simp only
+        omega
+      | some x =>
+        have := height_update ca h rest _ x d hx
+        simp only
+        omega
+
 /-! ## Laws -/
 
 section
@@ -979,6 +1132,27 @@ theorem offset_apply_scroll (ca : EditStructure) (h : ca.Value → Nat) (dy : In
   simp only [Scroll.offset]
   omega
 
+/-- The extent's derivative is correct: its amounts, added to the extent,
+give the extent after the edit. -/
+theorem extent_ok (ca : EditStructure) (h : ca.Value → Nat) : (extent ca h).ok := by
+  intro z e
+  show Extent.edits.apply (extent.df ca h z e) (z.extent h) = (Scroll.apply ca h e z).extent h
+  have hz : z.extent h = (Scroll.normalize h z).extent h := by
+    unfold Scroll.extent
+    rw [offset_normalize, rows_normalize]
+  cases e with
+  | scroll dy =>
+    show (⟨z.offset h + dy, height h z.rows + 0⟩ : Extent) =
+      ⟨(Scroll.apply ca h (.scroll dy) z).offset h, height h (Scroll.apply ca h (.scroll dy) z).rows⟩
+    rw [offset_apply_scroll, rows_apply_scroll, Int.add_zero]
+  | list e =>
+    have ha : (Scroll.apply ca h (.list e) z).extent h = (Scroll.edit ca e (Scroll.normalize h z)).extent h := by
+      unfold Scroll.apply Scroll.extent
+      simp only [Scroll.step]
+      rw [offset_normalize, rows_normalize]
+    rw [ha, hz, extent_edit]
+    rfl
+
 /-- The view's derivative is correct: its edits take what shows to what
 shows after the edit. -/
 theorem view_ok (ca : EditStructure) (h : ca.Value → Nat) (H : Int) : (view ca h H).ok := by
@@ -988,11 +1162,12 @@ theorem view_ok (ca : EditStructure) (h : ca.Value → Nat) (H : Int) : (view ca
       ((Scroll.normalize h z).rest.take (window h H (-(Scroll.normalize h z).off) (Scroll.normalize h z).rest).length) :=
     window_eq_place h H _ _
   unfold view.df
-  simp only
+  simp only [count_eq]
   rw [run_append, hd, core_ok ca h _ _ (window_length_le h H _ _), settle_ok]
   unfold Scroll.apply Scroll.draw
   rw [normalize_normalize]
 
+/-- So is the lifted view's, for runs of edits. -/
 theorem view_inc_ok (ca : EditStructure) (h : ca.Value → Nat) (H : Int) : (view.inc ca h H).ok :=
   lift_ok _ (view_ok ca h H)
 
