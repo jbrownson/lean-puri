@@ -117,3 +117,9 @@ incremental path still draws each row that enters (0.66 per frame here). A
 jump draws every row, as drawing the whole window does. On a window, the
 composite is GPU work; offscreen, the CPU copies about 6 MB per frame,
 timed apart above.
+
+The check compares every frame of the two paths: drawings, extents and the
+retained rows' tops are equal, and pixels differ by at most 17/255 (text
+antialiasing). At a fractional scale such as 1.5, rows are placed at whole
+pixels, so they can sit half a pixel from where drawing the whole window
+puts them.
