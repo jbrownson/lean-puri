@@ -1,6 +1,6 @@
 #!/bin/sh
 # Measures the incremental view against drawing the whole window, with no
-# display (Bench.lean). Run from the repository's root, after scripts/deps.sh.
+# display (Bench.lean). Run from the repository's root.
 #
 #   scripts/bench.sh               check, then time 5 rounds of 600 frames
 #   scripts/bench.sh --callgrind   also count instructions per frame (slow;

@@ -30,23 +30,26 @@ and drawn again each frame.
 
 ## Building
 
-Needs git, a C/C++ compiler, CMake, Meson and Ninja, and SDL's build
-dependencies (on Debian or Ubuntu: `libx11-dev libxext-dev libxcursor-dev
-libxrandr-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev
-libxkbcommon-dev libwayland-dev wayland-protocols libegl-dev libgl-dev`).
-Lean comes from [elan](https://github.com/leanprover/elan), at the version
-in `lean-toolchain`.
-
-```bash
-scripts/deps.sh
-```
-
 ```bash
 lake build
 ```
 
-`scripts/deps.sh` builds SDL3 and ThorVG into `deps/`. `lake build` checks
-the proofs and builds `demo` and `bench`.
+That checks the proofs and builds `demo` and `bench`, getting the native
+libraries itself:
+
+- **SDL3**: the system's, if `pkg-config` finds SDL3 3.2 or later. Arch
+  packages it as `sdl3`. Otherwise `lake build` builds the pinned release
+  into `deps/`, once. That needs CMake and SDL's build dependencies; on
+  Debian or Ubuntu they are `libx11-dev libxext-dev libxcursor-dev
+  libxrandr-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev
+  libxkbcommon-dev libwayland-dev wayland-protocols libegl-dev libgl-dev`.
+- **ThorVG**: always built from the pinned release into `deps/`, once. Few
+  systems package it, and we need its C API and TTF loader.
+
+Either way it needs git, a C/C++ compiler, Meson, Ninja and `pkg-config`.
+Lean comes from [elan](https://github.com/leanprover/elan), at the version
+in `lean-toolchain`. The first build takes a minute or two; after that, only
+what changed is rebuilt. The builds are `scripts/deps.sh`, which Lake runs.
 
 ## The demo
 
