@@ -1,65 +1,49 @@
 import Lake
 open Lake DSL System
 
-/-! `lake build` checks the proofs and builds the demo and the benchmark,
-getting the native dependencies itself:
-
-- SDL3 (the window, input): the system's, if `pkg-config` finds version 3.2
-  or later; otherwise built once from its pinned release into deps/.
-- ThorVG (drawing): always built once from its pinned release into deps/.
-  Few systems package it, and we need its C API and TTF loader.
-
-Building them is scripts/deps.sh. It needs git, a C/C++ compiler, Meson and
-Ninja, and for SDL3, CMake and SDL's build dependencies. -/
+/-! `lake build` checks the proofs and builds the demo and the benchmark. The
+native libraries come from the system, found with `pkg-config`: SDL3 (the
+window, input), 3.2 or later, and ThorVG (drawing), 1.1 or later, built with
+its C API (`-Dbindings=capi`) and TTF loader (`-Dloaders=ttf`). -/
 
 package «lean-puri» where
-  moreLinkArgs := #[
-    -- The libraries in deps/ are found from the executables in .lake/build/bin.
-    "-Wl,-rpath,$ORIGIN/../../../deps/install/lib",
-    -- Lean links against its own C library; system libraries may expect a
-    -- newer one, which they find at run time.
-    "-Wl,--allow-shlib-undefined"]
+  -- Lean links against its own C library; system libraries may expect a
+  -- newer one, which they find at run time.
+  moreLinkArgs := #["-Wl,--allow-shlib-undefined"]
 
-/-- A dependency's shared library in deps/install/lib, built from its pinned
-release by scripts/deps.sh unless it is there already. -/
-def pinned (pkg : Package) (name file : String) : JobM FilePath := do
-  let lib := pkg.dir / "deps" / "install" / "lib" / file
-  unless (← lib.pathExists) do
-    logInfo s!"building {name} into deps/ (once; it takes a few minutes)"
-    proc (quiet := true) { cmd := "sh", args := #["scripts/deps.sh", name], cwd := pkg.dir }
-  setTrace (← computeTrace lib)
-  return lib
+/-- A system library found with `pkg-config`: the path of its shared library,
+`lib<name>.so` in its `libdir`, where `<name>` is from its `-l` flag. -/
+def systemLib (modules : List String) (atLeast hint : String) : JobM FilePath := do
+  let pc (args : Array String) := captureProc? { cmd := "pkg-config", args }
+  for m in modules do
+    if (← testProc { cmd := "pkg-config", args := #[s!"--atleast-version={atLeast}", m] }) then
+      if let (some dir, some l) := (← pc #["--variable=libdir", m], ← pc #["--libs-only-l", m]) then
+        let lib := FilePath.mk dir / s!"lib{(l.drop 2).toString}.so"
+        if (← lib.pathExists) then
+          setTrace (← computeTrace lib)
+          return lib
+  error s!"pkg-config found no {modules.head!} {atLeast} or later: {hint}"
 
-/-- SDL3's shared library: the system's, if `pkg-config` finds version 3.2 or
-later, or else the pinned release's. -/
-target sdl3 pkg : FilePath := Job.async (caption := "SDL3") do
-  if (← testProc { cmd := "pkg-config", args := #["--atleast-version=3.2.0", "sdl3"] }) then
-    if let some dir ← captureProc? { cmd := "pkg-config", args := #["--variable=libdir", "sdl3"] } then
-      let lib := FilePath.mk dir / "libSDL3.so"
-      if (← lib.pathExists) then
-        setTrace (← computeTrace lib)
-        return lib
-  pinned pkg "sdl" "libSDL3.so"
+target sdl3 : FilePath := Job.async (caption := "SDL3") do
+  systemLib ["sdl3"] "3.2.0" "install SDL3's development package (on Arch, sdl3)"
 
-/-- ThorVG's shared library, from the pinned release. -/
-target thorvg pkg : FilePath := Job.async (caption := "ThorVG") do
-  pinned pkg "thorvg" "libthorvg-1.so"
+target thorvg : FilePath := Job.async (caption := "ThorVG") do
+  systemLib ["thorvg-1", "thorvg"] "1.1.0"
+    "install ThorVG, built with its C API and TTF loader (on Arch, the AUR's thorvg)"
+
+/-- The compiler flags of `pkg-config` modules. -/
+def cflags (modules : Array String) : JobM (Array String) := do
+  let flags := (← captureProc? { cmd := "pkg-config", args := #["--cflags"] ++ modules }).getD ""
+  return flags.splitOn " " |>.filter (· ≠ "") |>.toArray
 
 /-- The bridge between Lean and the native libraries (native/platform.c). -/
 target platform.o pkg : FilePath := do
   let src ← inputTextFile (pkg.dir / "native" / "platform.c")
   let libs := (← sdl3.fetch).zipWith (·, ·) (← thorvg.fetch)
-  libs.bindM fun (sdl, _) => do
-    let deps := pkg.dir / "deps" / "install"
-    -- SDL3's headers: beside the pinned library, or where pkg-config says.
-    let sdlFlags ←
-      if sdl.toString.startsWith deps.toString then
-        pure #["-I", (deps / "include").toString]
-      else
-        let flags := (← captureProc? { cmd := "pkg-config", args := #["--cflags", "sdl3"] }).getD ""
-        pure (flags.splitOn " " |>.filter (· ≠ "") |>.toArray)
-    let includes := #["-I", (← getLeanIncludeDir).toString, "-I", (deps / "include" / "thorvg-1").toString]
-    buildO (pkg.buildDir / "native" / "platform.o") src (includes ++ sdlFlags) #["-fPIC", "-O2"] "cc"
+  libs.bindM fun (_, tvg) => do
+    let tvgModule := if tvg.fileName == some "libthorvg-1.so" then "thorvg-1" else "thorvg"
+    let flags := #["-I", (← getLeanIncludeDir).toString] ++ (← cflags #["sdl3", tvgModule])
+    buildO (pkg.buildDir / "native" / "platform.o") src flags #["-fPIC", "-O2"] "cc"
 
 target libplatform pkg : FilePath := do
   buildStaticLib (pkg.staticLibDir / nameToStaticLib "platform") #[← platform.o.fetch]
