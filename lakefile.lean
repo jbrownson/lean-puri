@@ -1,48 +1,71 @@
 import Lake
 open Lake DSL System
 
-/-! `lake build` checks the proofs and builds the demo and the benchmark. The
-native libraries come from the system, found with `pkg-config`: SDL3 (the
-window, input), 3.2 or later, and ThorVG (drawing), 1.1 or later, built with
-its C API (`-Dbindings=capi`) and TTF loader (`-Dloaders=ttf`). -/
+/-! `lake build` checks the proofs and builds the demo and the benchmark,
+with two native libraries:
+
+- SDL3 (the window, input), 3.2 or later, from the system, found with
+  `pkg-config`.
+- ThorVG (drawing), built here from a pinned release by its own Meson build,
+  once. Few systems package a recent ThorVG with its C API, and how fast it
+  draws text is what the benchmark measures. Needs git, Meson, Ninja and a
+  C++ compiler. -/
 
 package «lean-puri» where
-  -- Lean links against its own C library; system libraries may expect a
-  -- newer one, which they find at run time.
-  moreLinkArgs := #["-Wl,--allow-shlib-undefined"]
+  moreLinkArgs := #[
+    -- ThorVG is found from the executables in .lake/build/bin.
+    "-Wl,-rpath,$ORIGIN/../thorvg/install/lib",
+    -- Lean links against its own C library; system libraries may expect a
+    -- newer one, which they find at run time.
+    "-Wl,--allow-shlib-undefined"]
 
-/-- A system library found with `pkg-config`: the path of its shared library,
-`lib<name>.so` in its `libdir`, where `<name>` is from its `-l` flag. -/
-def systemLib (modules : List String) (atLeast hint : String) : JobM FilePath := do
-  let pc (args : Array String) := captureProc? { cmd := "pkg-config", args }
-  for m in modules do
-    if (← testProc { cmd := "pkg-config", args := #[s!"--atleast-version={atLeast}", m] }) then
-      if let (some dir, some l) := (← pc #["--variable=libdir", m], ← pc #["--libs-only-l", m]) then
-        let lib := FilePath.mk dir / s!"lib{(l.drop 2).toString}.so"
-        if (← lib.pathExists) then
-          setTrace (← computeTrace lib)
-          return lib
-  error s!"pkg-config found no {modules.head!} {atLeast} or later: {hint}"
+/-- The path of a system library's shared library, found with `pkg-config`:
+`lib<name>.so` in its `libdir`, where `<name>` is from its `-l` flag. Lean's
+linker doesn't search the system's library directories, so it is given the
+file itself. -/
+def systemLib (module atLeast hint : String) : JobM FilePath := do
+  let pc (args : Array String) := captureProc? { cmd := "pkg-config", args := args.push module }
+  if (← testProc { cmd := "pkg-config", args := #[s!"--atleast-version={atLeast}", module] }) then
+    if let (some dir, some l) := (← pc #["--variable=libdir"], ← pc #["--libs-only-l"]) then
+      let lib := FilePath.mk dir / s!"lib{(l.drop 2).toString}.so"
+      if (← lib.pathExists) then
+        setTrace (← computeTrace lib)
+        return lib
+  error s!"pkg-config found no {module} {atLeast} or later: {hint}"
 
 target sdl3 : FilePath := Job.async (caption := "SDL3") do
-  systemLib ["sdl3"] "3.2.0" "install SDL3's development package (on Arch, sdl3)"
+  systemLib "sdl3" "3.2.0" "install SDL3's development package (on Arch, sdl3)"
 
-target thorvg : FilePath := Job.async (caption := "ThorVG") do
-  systemLib ["thorvg-1", "thorvg"] "1.1.0"
-    "install ThorVG, built with its C API and TTF loader (on Arch, the AUR's thorvg)"
+/-- The ThorVG release built here. -/
+def thorvgTag := "v1.1.3"
 
-/-- The compiler flags of `pkg-config` modules. -/
-def cflags (modules : Array String) : JobM (Array String) := do
-  let flags := (← captureProc? { cmd := "pkg-config", args := #["--cflags"] ++ modules }).getD ""
-  return flags.splitOn " " |>.filter (· ≠ "") |>.toArray
+/-- ThorVG, fetched at `thorvgTag` and built into .lake/build/thorvg, unless
+it is there already: the path of its shared library. -/
+target thorvg pkg : FilePath := Job.async (caption := "ThorVG") do
+  let dir := pkg.buildDir / "thorvg"
+  let lib := dir / "install" / "lib" / "libthorvg-1.so"
+  unless (← lib.pathExists) do
+    logInfo s!"building ThorVG {thorvgTag} (once)"
+    if (← (dir / "build").pathExists) then IO.FS.removeDirAll (dir / "build")
+    unless (← (dir / "src").pathExists) do
+      proc (quiet := true) { cmd := "git", args := #["clone", "--depth", "1", "--branch", thorvgTag,
+        "https://github.com/thorvg/thorvg.git", (dir / "src").toString] }
+    proc (quiet := true) { cmd := "meson", args := #["setup", (dir / "build").toString, (dir / "src").toString,
+      "--buildtype=release", s!"--prefix={dir / "install"}", "--libdir=lib", "-Ddefault_library=shared",
+      "-Dengines=cpu", "-Dloaders=svg,ttf", "-Dbindings=capi", "-Dtools=", "-Dtests=false", "-Dextra="] }
+    proc (quiet := true) { cmd := "ninja", args := #["-C", (dir / "build").toString, "install"] }
+  setTrace (← computeTrace lib)
+  return lib
 
 /-- The bridge between Lean and the native libraries (native/platform.c). -/
 target platform.o pkg : FilePath := do
   let src ← inputTextFile (pkg.dir / "native" / "platform.c")
   let libs := (← sdl3.fetch).zipWith (·, ·) (← thorvg.fetch)
   libs.bindM fun (_, tvg) => do
-    let tvgModule := if tvg.fileName == some "libthorvg-1.so" then "thorvg-1" else "thorvg"
-    let flags := #["-I", (← getLeanIncludeDir).toString] ++ (← cflags #["sdl3", tvgModule])
+    let sdlFlags := (← captureProc? { cmd := "pkg-config", args := #["--cflags", "sdl3"] }).getD ""
+    let tvgInclude := tvg.parent.bind (·.parent) |>.getD "." |>.join "include" |>.join "thorvg-1"
+    let flags := #["-I", (← getLeanIncludeDir).toString, "-I", tvgInclude.toString] ++
+      (sdlFlags.splitOn " " |>.filter (· ≠ "") |>.toArray)
     buildO (pkg.buildDir / "native" / "platform.o") src flags #["-fPIC", "-O2"] "cc"
 
 target libplatform pkg : FilePath := do

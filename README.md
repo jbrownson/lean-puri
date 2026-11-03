@@ -34,19 +34,19 @@ and drawn again each frame.
 lake build
 ```
 
-That checks the proofs and builds `demo` and `bench`. It needs, from the
-system's package manager, found with `pkg-config`:
+That checks the proofs and builds `demo` and `bench`. It needs:
 
-- **SDL3** 3.2 or later, with its development files. On Arch: `sdl3`.
-- **ThorVG** 1.1 or later, built with its C API and TTF loader. On Arch:
-  `thorvg` from the AUR.
+- **SDL3** 3.2 or later from the system's package manager, with its
+  development files, found with `pkg-config`. On Arch: `sdl3`.
+- To build **ThorVG**: git, Meson, Ninja and a C++ compiler. ThorVG itself
+  isn't installed; `lake build` fetches the pinned release (1.1.3) and builds
+  it into `.lake/build/thorvg`, once. Few distributions package a recent
+  ThorVG (most have 1.0.6, and Arch only the AUR's), and how fast it draws
+  text is what the benchmark measures.
 
-It also needs a C compiler and `pkg-config`. Lean comes from
-[elan](https://github.com/leanprover/elan), at the version in
-`lean-toolchain`. If a library is missing, `lake build` says which.
-
-The measurements below used SDL 3.4.18 and ThorVG 1.1.3. Another ThorVG
-draws text at a different speed.
+Lean comes from [elan](https://github.com/leanprover/elan), at the version
+in `lean-toolchain`. The first build takes under a minute; after that, only
+what changed is rebuilt. If SDL3 is missing, `lake build` says so.
 
 ## The demo
 
